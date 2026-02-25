@@ -3,8 +3,8 @@ const app = express();
 app.use(express.json());
 
 // These variables will be injected secretly by Render
-const ESP_TOKEN = process.env.ESP_TOKEN || "FallbackSecret123";
-const KILL_SWITCH = process.env.KILL_SWITCH === 'true'; // Set to 'true' in Render to drop traffic
+const ESP_TOKEN = process.env.ESP_TOKEN || "Firewall@1153";
+const KILL_SWITCH = process.env.KILL_SWITCH === 'true'; 
 const FIREBASE_URL = process.env.FIREBASE_URL; 
 const FIREBASE_SECRET = process.env.FIREBASE_SECRET;
 
@@ -17,19 +17,39 @@ app.post('/api/update', async (req, res) => {
         return res.status(401).json({ error: "Access Denied: Invalid Token" });
     }
 
-    const { room_id, headcount } = req.body;
-    if (!room_id || headcount === undefined) return res.status(400).json({ error: "Missing data" });
+    // 3. Grab the exact data your ESP32 is sending
+    const { roomStatus, heartbeat, adminResult } = req.body;
+    
+    // If there's no status at all, reject it
+    if (!roomStatus) return res.status(400).json({ error: "Missing roomStatus data" });
 
-    // 3. Forward securely to Firebase Realtime DB (OVERWRITE data, zero storage bloat)
+    // 4. Forward securely to Firebase
     try {
-        // We use PUT to replace the value, keeping DB size at near 0MB
-        const fbResponse = await fetch(`${FIREBASE_URL}/rooms/${room_id}.json?auth=${FIREBASE_SECRET}`, {
+        // Update the main FREE/BUSY status
+        const statusRes = await fetch(`${FIREBASE_URL}/roomStatus.json?auth=${FIREBASE_SECRET}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ headcount: headcount, last_updated: Date.now() })
+            body: JSON.stringify(roomStatus)
         });
-        
-        if (!fbResponse.ok) throw new Error("Firebase rejected the request");
+        if (!statusRes.ok) throw new Error("Firebase rejected the status update");
+
+        // Update heartbeat if the ESP32 sent one
+        if (heartbeat) {
+            await fetch(`${FIREBASE_URL}/heartbeat.json?auth=${FIREBASE_SECRET}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(heartbeat)
+            });
+        }
+
+        // Update admin logs if the ESP32 sent one
+        if (adminResult) {
+            await fetch(`${FIREBASE_URL}/admin/result.json?auth=${FIREBASE_SECRET}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(adminResult)
+            });
+        }
         
         res.status(200).json({ success: true, message: "Wall Passed. Database updated." });
     } catch (error) {
