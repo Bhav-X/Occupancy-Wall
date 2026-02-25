@@ -1,61 +1,74 @@
 const express = require('express');
+const cors = require('cors');
 const app = express();
-app.use(express.json());
 
-// These variables will be injected secretly by Render
-const ESP_TOKEN = process.env.ESP_TOKEN || "Firewall@1153";
-const KILL_SWITCH = process.env.KILL_SWITCH === 'true'; 
+app.use(express.json());
+app.use(cors()); // Makes the Wall invisible to browser security blocks
+
+const ESP_TOKEN = process.env.ESP_TOKEN || "SuperSecureSchoolProject2026";
 const FIREBASE_URL = process.env.FIREBASE_URL; 
 const FIREBASE_SECRET = process.env.FIREBASE_SECRET;
 
+// 🛑 1. THE WRITER (ESP32 sends data here)
 app.post('/api/update', async (req, res) => {
-    // 1. Check Kill Switch
-    if (KILL_SWITCH) return res.status(503).json({ error: "System Offline: Maintenance Mode" });
-    
-    // 2. The Bouncer (Check ESP Auth)
+    // Invisible Bouncer
     if (req.headers.authorization !== `Bearer ${ESP_TOKEN}`) {
-        return res.status(401).json({ error: "Access Denied: Invalid Token" });
+        return res.status(401).send("Denied");
     }
 
-    // 3. Grab the exact data your ESP32 is sending
     const { roomStatus, heartbeat, adminResult } = req.body;
-    
-    // If there's no status at all, reject it
-    if (!roomStatus) return res.status(400).json({ error: "Missing roomStatus data" });
+    if (!roomStatus) return res.status(400).send("Bad Data");
 
-    // 4. Forward securely to Firebase
     try {
-        // Update the main FREE/BUSY status
-        const statusRes = await fetch(`${FIREBASE_URL}/roomStatus.json?auth=${FIREBASE_SECRET}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(roomStatus)
+        // Render uses its God-Mode secret to overwrite the locked DB
+        await fetch(`${FIREBASE_URL}/roomStatus.json?auth=${FIREBASE_SECRET}`, {
+            method: 'PUT', body: JSON.stringify(roomStatus)
         });
-        if (!statusRes.ok) throw new Error("Firebase rejected the status update");
-
-        // Update heartbeat if the ESP32 sent one
         if (heartbeat) {
             await fetch(`${FIREBASE_URL}/heartbeat.json?auth=${FIREBASE_SECRET}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(heartbeat)
+                method: 'PUT', body: JSON.stringify(heartbeat)
             });
         }
-
-        // Update admin logs if the ESP32 sent one
         if (adminResult) {
             await fetch(`${FIREBASE_URL}/admin/result.json?auth=${FIREBASE_SECRET}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(adminResult)
+                method: 'PUT', body: JSON.stringify(adminResult)
             });
         }
-        
-        res.status(200).json({ success: true, message: "Wall Passed. Database updated." });
+        res.status(200).json({ success: true });
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: "Database connection failed" });
+        res.status(500).send("Proxy Error");
     }
 });
 
-app.listen(process.env.PORT || 3000, () => console.log("Invisible Wall is UP!"));
+// 🟢 2. THE READER (Website & ESP8266 get data here)
+app.get('/api/status', async (req, res) => {
+    try {
+        // Render fetches the whole DB state using its secret and hands it to the user
+        const response = await fetch(`${FIREBASE_URL}/.json?auth=${FIREBASE_SECRET}`);
+        const data = await response.json();
+        res.status(200).json(data);
+    } catch (error) {
+        res.status(500).send("Proxy Error");
+    }
+});
+
+// 3. ADMIN COMMANDS (Website sends commands to ESP32 via here)
+app.post('/api/command', async (req, res) => {
+    const { key, cmd } = req.body;
+    // Basic password for your website UI
+    if (key !== "AdminKey2026") return res.status(401).send("Denied");
+
+    try {
+        await fetch(`${FIREBASE_URL}/admin/cmd.json?auth=${FIREBASE_SECRET}`, {
+            method: 'PUT', body: JSON.stringify(cmd)
+        });
+        await fetch(`${FIREBASE_URL}/admin/key.json?auth=${FIREBASE_SECRET}`, {
+            method: 'PUT', body: JSON.stringify(key)
+        });
+        res.status(200).json({ success: true });
+    } catch (error) {
+        res.status(500).send("Proxy Error");
+    }
+});
+
+app.listen(process.env.PORT || 3000, () => console.log("Invisible Proxy is UP!"));
