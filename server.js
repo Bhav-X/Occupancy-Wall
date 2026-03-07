@@ -1,3 +1,22 @@
+const rateMap = {};
+
+function rateLimit(ip) {
+  const now = Date.now();
+  if (!rateMap[ip]) rateMap[ip] = [];
+  rateMap[ip] = rateMap[ip].filter(t => now - t < 60000); // keep last 60s
+  if (rateMap[ip].length >= 10) return false; // max 10 requests per minute
+  rateMap[ip].push(now);
+  return true;
+}
+
+// Then in /api/command route, add at the top:
+app.post('/api/command', async (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  if (!rateLimit(ip)) {
+    return res.status(429).send("Too many requests. Slow down.");
+  }
+
+
 const express = require('express');
 const app = express();
 
