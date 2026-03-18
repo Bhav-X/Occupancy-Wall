@@ -1,15 +1,6 @@
-const express = require('express'); // ehehehehhe
+const express = require('express');
 const app = express();
 app.use(express.json());
-
-// Allow requests from any origin (required for GitHub Pages)
-app.use((req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    if (req.method === "OPTIONS") return res.sendStatus(200);
-    next();
-});
 
 // --- Environment Variables (Set these in your Render Dashboard) ---
 const FIREBASE_URL     = process.env.FIREBASE_URL;
@@ -40,10 +31,12 @@ app.get('/', (req, res) => {
 // ---------------------------------------------------------
 app.get('/api/public-status', async (req, res) => {
     try {
-        const response = await fetch(`${FIREBASE_URL}/roomStatus.json?auth=${FIREBASE_SECRET}`);
-        const roomStatus = await response.json();
-        // Only returns roomStatus — no admin fields, no tokens, no heartbeat exposed
-        res.status(200).json({ roomStatus: roomStatus || "UNKNOWN" });
+        const response = await fetch(`${FIREBASE_URL}/.json?auth=${FIREBASE_SECRET}`);
+        const data = await response.json();
+        res.status(200).json({ 
+            roomStatus: data?.roomStatus || "UNKNOWN",
+            heartbeat: data?.admin?.heartbeat || 0
+        });
     } catch (error) {
         console.error("Public status fetch error:", error);
         res.status(500).send("Status unavailable");
