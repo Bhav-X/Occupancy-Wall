@@ -154,7 +154,8 @@ app.post('/api/command', async (req, res) => {
 // 5. ADMIN RESULT
 // ---------------------------------------------------------
 app.get('/api/result', async (req, res) => {
-    if (req.headers.authorization !== `Bearer ${READ_TOKEN}`) {
+    //  Change READ_TOKEN to ADMIN_KEY
+    if (req.headers.authorization !== `Bearer ${ADMIN_KEY}`) { 
         return res.status(403).send("Access Denied");
     }
     try {
