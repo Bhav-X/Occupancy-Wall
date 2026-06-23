@@ -1,26 +1,28 @@
 const express = require('express');
 const app = express();
+
+// 1. CRITICAL FIX FOR RENDER: Trust the proxy so rate limiting works per user, not per server.
+app.set('trust proxy', 1);
 app.use(express.json());
 
 // --- CORS (required for GitHub Pages to call Render) ---
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PATCH, PUT");
     if (req.method === "OPTIONS") return res.sendStatus(200);
     next();
 });
 
-// --- Environment Variables (Set these in your Render Dashboard) ---
+// --- Environment Variables ---
 const FIREBASE_URL     = process.env.FIREBASE_URL;
 const FIREBASE_SECRET  = process.env.FIREBASE_SECRET;
 const ESP_TOKEN        = process.env.ESP_TOKEN;
 const READ_TOKEN       = process.env.READ_TOKEN;
-const ADMIN_KEY        = process.env.ADMIN_KEY;  // NEW: admin key verified server-side too
+const ADMIN_KEY        = process.env.ADMIN_KEY;  
 
-// --- Rate Limiter (max 10 requests per minute per IP) ---
+// --- Rate Limiter ---
 const rateMap = {};
-
 function rateLimit(ip) {
     const now = Date.now();
     if (!rateMap[ip]) rateMap[ip] = [];
@@ -30,13 +32,12 @@ function rateLimit(ip) {
     return true;
 }
 
-// Root route
 app.get('/', (req, res) => {
     res.send("The system is up and running.");
 });
 
 // ---------------------------------------------------------
-// 1. PUBLIC STATUS: Website reads only roomStatus (no tokens, no admin data exposed)
+// 1. PUBLIC STATUS
 // ---------------------------------------------------------
 app.get('/api/public-status', async (req, res) => {
     try {
@@ -53,7 +54,7 @@ app.get('/api/public-status', async (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 2. FULL STATUS: ESP8266 reads full DB (requires read token)
+// 2. FULL STATUS
 // ---------------------------------------------------------
 app.get('/api/status', async (req, res) => {
     if (req.headers.authorization !== `Bearer ${READ_TOKEN}`) {
@@ -70,7 +71,7 @@ app.get('/api/status', async (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 3. DATA UPLINK: ESP32 pushes status/heartbeat/result
+// 3. DATA UPLINK
 // ---------------------------------------------------------
 app.post('/api/update', async (req, res) => {
     if (req.headers.authorization !== `Bearer ${ESP_TOKEN}`) {
@@ -107,29 +108,41 @@ app.post('/api/update', async (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 4. COMMAND CENTER: Website sends admin commands
+// 4. COMMAND CENTER 
 // ---------------------------------------------------------
 app.post('/api/command', async (req, res) => {
-    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    const ip = req.ip; // Now safely uses the real IP from the proxy
 
-    // Rate limit
     if (!rateLimit(ip)) {
         return res.status(429).send("Too many requests. Slow down.");
     }
 
     const { cmd, key, id, maintenance } = req.body;
 
-    // Server-side key verification (skip check for reset command cmd="0")
     if (cmd !== "0" && key !== ADMIN_KEY) {
         return res.status(403).send("Access Denied: Wrong Key");
     }
 
     try {
+        // Send command to Firebase
         await fetch(`${FIREBASE_URL}/admin.json?auth=${FIREBASE_SECRET}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(req.body)
         });
+
+        // 2. CRITICAL FIX: Auto-clear the command after 3 seconds so the ESP32 doesn't loop
+        if (cmd !== "0") {
+            setTimeout(async () => {
+                await fetch(`${FIREBASE_URL}/admin.json?auth=${FIREBASE_SECRET}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cmd: "0", key: "0" })
+                });
+                console.log(">> Auto-cleared stale command in Firebase");
+            }, 3000);
+        }
+
         res.status(200).send("Command forwarded");
     } catch (error) {
         console.error("Command error:", error);
@@ -138,7 +151,7 @@ app.post('/api/command', async (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 5. ADMIN RESULT: Website polls for ESP32 response
+// 5. ADMIN RESULT
 // ---------------------------------------------------------
 app.get('/api/result', async (req, res) => {
     if (req.headers.authorization !== `Bearer ${READ_TOKEN}`) {
