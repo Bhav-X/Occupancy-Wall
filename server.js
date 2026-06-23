@@ -132,13 +132,6 @@ app.post('/api/command', async (req, res) => {
         });
 
         // 2. CRITICAL FIX: Auto-clear the command after 3 seconds so the ESP32 doesn't loop
-        try {
-        // Send command to Firebase
-        await fetch(`${FIREBASE_URL}/admin.json?auth=${FIREBASE_SECRET}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(req.body)
-        });
 
         res.status(200).send("Command forwarded");
     } catch (error) {
