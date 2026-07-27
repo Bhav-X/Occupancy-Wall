@@ -1,11 +1,10 @@
 const express = require('express');
 const app = express();
 
-// 1. CRITICAL FIX FOR RENDER: Trust the proxy so rate limiting works per user, not per server.
 app.set('trust proxy', 1);
 app.use(express.json());
 
-// --- CORS (required for GitHub Pages to call Render) ---
+// --- CORS ---
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -27,7 +26,7 @@ function rateLimit(ip) {
     const now = Date.now();
     if (!rateMap[ip]) rateMap[ip] = [];
     rateMap[ip] = rateMap[ip].filter(t => now - t < 60000);
-    if (rateMap[ip].length >= 10) return false;
+    if (rateMap[ip].length >= 15) return false; // Allowed slightly more for smooth polling
     rateMap[ip].push(now);
     return true;
 }
@@ -71,7 +70,7 @@ app.get('/api/status', async (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 3. DATA UPLINK
+// 3. DATA UPLINK (From ESP32)
 // ---------------------------------------------------------
 app.post('/api/update', async (req, res) => {
     if (req.headers.authorization !== `Bearer ${ESP_TOKEN}`) {
@@ -108,10 +107,10 @@ app.post('/api/update', async (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 4. COMMAND CENTER 
+// 4. COMMAND CENTER (The Server Bouncer)
 // ---------------------------------------------------------
 app.post('/api/command', async (req, res) => {
-    const ip = req.ip; // Now safely uses the real IP from the proxy
+    const ip = req.ip;
 
     if (!rateLimit(ip)) {
         return res.status(429).send("Too many requests. Slow down.");
@@ -119,19 +118,32 @@ app.post('/api/command', async (req, res) => {
 
     const { cmd, key, id, maintenance } = req.body;
 
-    if (cmd !== "0" && key !== ADMIN_KEY) {
+    // BOUNCER: Rejects wrong admin key instantly.
+    if (cmd !== "000" && key !== ADMIN_KEY) {
         return res.status(403).send("Access Denied: Wrong Key");
     }
 
     try {
-        // Send command to Firebase
         await fetch(`${FIREBASE_URL}/admin.json?auth=${FIREBASE_SECRET}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(req.body)
         });
 
-        // 2. CRITICAL FIX: Auto-clear the command after 3 seconds so the ESP32 doesn't loop
+        // 7-SECOND AUTO-CLEAR: Give ESP32 time to grab it, then wipe it.
+        if (cmd !== "000") {
+            setTimeout(async () => {
+                try {
+                    await fetch(`${FIREBASE_URL}/admin.json?auth=${FIREBASE_SECRET}`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ cmd: "000" })
+                    });
+                } catch (e) {
+                    console.error("Auto-clear failed", e);
+                }
+            }, 7000); 
+        }
 
         res.status(200).send("Command forwarded");
     } catch (error) {
@@ -144,11 +156,13 @@ app.post('/api/command', async (req, res) => {
 // 5. ADMIN RESULT
 // ---------------------------------------------------------
 app.get('/api/result', async (req, res) => {
-    //  Change READ_TOKEN to ADMIN_KEY
     const authHeader = req.headers.authorization;
+    
+    // Allow both ADMIN_KEY (for website interaction) and READ_TOKEN (for basic viewing)
     if (authHeader !== `Bearer ${ADMIN_KEY}` && authHeader !== `Bearer ${READ_TOKEN}`) { 
         return res.status(403).send("Access Denied");
     }
+    
     try {
         const response = await fetch(`${FIREBASE_URL}/admin.json?auth=${FIREBASE_SECRET}`);
         const data = await response.json();
@@ -164,12 +178,9 @@ app.get('/api/result', async (req, res) => {
 // --- Keep alive ---
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || "http://localhost:3000";
 setInterval(async () => {
-    try {
-        await fetch(`${SELF_URL}/`);
-    } catch (e) {}
+    try { await fetch(`${SELF_URL}/`); } catch (e) {}
 }, 10 * 60 * 1000);
 
-// --- Server Startup ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Wall active on port ${PORT}`);
