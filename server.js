@@ -26,17 +26,15 @@ function rateLimit(ip) {
     const now = Date.now();
     if (!rateMap[ip]) rateMap[ip] = [];
     rateMap[ip] = rateMap[ip].filter(t => now - t < 60000);
-    if (rateMap[ip].length >= 15) return false; // Allowed slightly more for smooth polling
+    if (rateMap[ip].length >= 75) return false; 
     rateMap[ip].push(now);
     return true;
 }
 
-app.get('/', (req, res) => {
-    res.send("The system is up and running.");
-});
+app.get('/', (req, res) => res.send("System is up and running."));
 
 // ---------------------------------------------------------
-// 1. PUBLIC STATUS
+// 1. STATUS ENDPOINTS
 // ---------------------------------------------------------
 app.get('/api/public-status', async (req, res) => {
     try {
@@ -47,93 +45,91 @@ app.get('/api/public-status', async (req, res) => {
             heartbeat: data?.admin?.heartbeat || 0
         });
     } catch (error) {
-        console.error("Public status fetch error:", error);
         res.status(500).send("Status unavailable");
     }
 });
 
-// ---------------------------------------------------------
-// 2. FULL STATUS
-// ---------------------------------------------------------
 app.get('/api/status', async (req, res) => {
-    if (req.headers.authorization !== `Bearer ${READ_TOKEN}`) {
-        return res.status(403).send("Access Denied");
-    }
+    if (req.headers.authorization !== `Bearer ${READ_TOKEN}`) return res.status(403).send("Access Denied");
     try {
         const response = await fetch(`${FIREBASE_URL}/.json?auth=${FIREBASE_SECRET}`);
         const data = await response.json();
         res.status(200).json(data || {});
     } catch (error) {
-        console.error("Database fetch error:", error);
         res.status(500).send("Database Unreachable");
     }
 });
 
 // ---------------------------------------------------------
-// 3. DATA UPLINK (From ESP32)
+// 2. SSE STREAMING MANAGER (ESP32 Pipeline)
 // ---------------------------------------------------------
-app.post('/api/update', async (req, res) => {
-    if (req.headers.authorization !== `Bearer ${ESP_TOKEN}`) {
-        return res.status(403).send("Access Denied: Invalid Uplink Token");
+let sseClients = [];
+
+app.get('/api/sse-command', async (req, res) => {
+    if (req.headers.authorization !== `Bearer ${READ_TOKEN}`) {
+        return res.status(403).send("Access Denied");
     }
-    const { roomStatus, heartbeat, adminResult } = req.body;
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    sseClients.push(res);
+
+    // RACE-CONDITION FIX: Instantly check Firebase on connect in case a command was sent during the 500ms cycle
     try {
-        if (roomStatus) {
-            await fetch(`${FIREBASE_URL}/roomStatus.json?auth=${FIREBASE_SECRET}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(roomStatus)
-            });
+        const fbRes = await fetch(`${FIREBASE_URL}/admin.json?auth=${FIREBASE_SECRET}`);
+        const fbData = await fbRes.json();
+        if (fbData && fbData.cmd && fbData.cmd !== "000") {
+            res.write(`data: ${JSON.stringify({ admin: { cmd: fbData.cmd, key: fbData.key } })}\n\n`);
         }
-        if (heartbeat) {
-            await fetch(`${FIREBASE_URL}/admin/heartbeat.json?auth=${FIREBASE_SECRET}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(heartbeat)
-            });
-        }
-        if (adminResult) {
-            await fetch(`${FIREBASE_URL}/admin/result.json?auth=${FIREBASE_SECRET}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(adminResult)
-            });
-        }
-        res.status(200).send("Data synced");
-    } catch (error) {
-        console.error("Firebase sync error:", error);
-        res.status(500).send("Sync failed");
-    }
+    } catch(e) { console.error("Initial SSE fetch failed"); }
+
+    // Watchdog: Ping every 15s to prevent silent socket drops
+    const pingInterval = setInterval(() => {
+        if (!res.writableEnded) res.write(': ping\n\n'); 
+    }, 15000);
+
+    // Cleanup when ESP32 cycles connection
+    req.on('close', () => {
+        clearInterval(pingInterval);
+        sseClients = sseClients.filter(client => client !== res);
+        res.end();
+    });
 });
 
 // ---------------------------------------------------------
-// 4. COMMAND CENTER (The Server Bouncer)
+// 3. COMMAND CENTER (Intercepts & Pushes to SSE)
 // ---------------------------------------------------------
 app.post('/api/command', async (req, res) => {
     const ip = req.ip;
+    if (!rateLimit(ip)) return res.status(429).send("Too many requests.");
 
-    if (!rateLimit(ip)) {
-        return res.status(429).send("Too many requests. Slow down.");
-    }
+    const { cmd, key } = req.body;
 
-    const { cmd, key, id, maintenance } = req.body;
-
-    // BOUNCER: Rejects wrong admin key instantly.
     if (cmd !== "000" && key !== ADMIN_KEY) {
         return res.status(403).send("Access Denied: Wrong Key");
     }
 
     try {
-        // Inject result: "" to instantly wipe the backlog when a new command is issued
-        const payload = { ...req.body, result: "" }; 
+        // ECHO-LOOP FIX: Only push active commands to SSE, ignore "000" clears from the ESP32
+        if (cmd !== "000") {
+            const ssePayload = JSON.stringify({ admin: { cmd, key } });
+            sseClients.forEach(client => {
+                if (!client.writableEnded) client.write(`data: ${ssePayload}\n\n`);
+            });
+        }
 
+        // Persist to Firebase and instantly clear frontend result backlog
+        const payload = { ...req.body, result: "" }; 
         await fetch(`${FIREBASE_URL}/admin.json?auth=${FIREBASE_SECRET}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
 
-        // 7-SECOND AUTO-CLEAR: Give ESP32 time to grab it, then wipe it.
+        // 7-Second Auto-Clear Firebase State
         if (cmd !== "000") {
             setTimeout(async () => {
                 try {
@@ -142,37 +138,39 @@ app.post('/api/command', async (req, res) => {
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ cmd: "000" })
                     });
-                } catch (e) {
-                    console.error("Auto-clear failed", e);
-                }
+                } catch (e) {}
             }, 7000); 
         }
 
-        res.status(200).send("Command forwarded");
+        res.status(200).send("Command processed");
     } catch (error) {
-        console.error("Command error:", error);
         res.status(500).send("Failed to forward command");
     }
 });
 
 // ---------------------------------------------------------
-// 5. ADMIN RESULT
+// 4. DATA UPLINK & RESULTS
 // ---------------------------------------------------------
+app.post('/api/update', async (req, res) => {
+    if (req.headers.authorization !== `Bearer ${ESP_TOKEN}`) return res.status(403).send("Access Denied");
+    const { roomStatus, heartbeat, adminResult } = req.body;
+    try {
+        if (roomStatus) await fetch(`${FIREBASE_URL}/roomStatus.json?auth=${FIREBASE_SECRET}`, { method: 'PUT', body: JSON.stringify(roomStatus) });
+        if (heartbeat) await fetch(`${FIREBASE_URL}/admin/heartbeat.json?auth=${FIREBASE_SECRET}`, { method: 'PUT', body: JSON.stringify(heartbeat) });
+        if (adminResult) await fetch(`${FIREBASE_URL}/admin/result.json?auth=${FIREBASE_SECRET}`, { method: 'PUT', body: JSON.stringify(adminResult) });
+        res.status(200).send("Data synced");
+    } catch (error) {
+        res.status(500).send("Sync failed");
+    }
+});
+
 app.get('/api/result', async (req, res) => {
     const authHeader = req.headers.authorization;
-    
-    // Allow both ADMIN_KEY (for website interaction) and READ_TOKEN (for basic viewing)
-    if (authHeader !== `Bearer ${ADMIN_KEY}` && authHeader !== `Bearer ${READ_TOKEN}`) { 
-        return res.status(403).send("Access Denied");
-    }
-    
+    if (authHeader !== `Bearer ${ADMIN_KEY}` && authHeader !== `Bearer ${READ_TOKEN}`) return res.status(403).send("Access Denied");
     try {
         const response = await fetch(`${FIREBASE_URL}/admin.json?auth=${FIREBASE_SECRET}`);
         const data = await response.json();
-        res.status(200).json({
-            result: data?.result || "",
-            heartbeat: data?.heartbeat || 0
-        });
+        res.status(200).json({ result: data?.result || "", heartbeat: data?.heartbeat || 0 });
     } catch (error) {
         res.status(500).send("Unavailable");
     }
@@ -180,11 +178,7 @@ app.get('/api/result', async (req, res) => {
 
 // --- Keep alive ---
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || "http://localhost:3000";
-setInterval(async () => {
-    try { await fetch(`${SELF_URL}/`); } catch (e) {}
-}, 10 * 60 * 1000);
+setInterval(async () => { try { await fetch(`${SELF_URL}/`); } catch (e) {} }, 10 * 60 * 1000);
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Wall active on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Wall active on port ${PORT}`));
