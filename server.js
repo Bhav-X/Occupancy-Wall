@@ -124,10 +124,13 @@ app.post('/api/command', async (req, res) => {
     }
 
     try {
+        // Inject result: "" to instantly wipe the backlog when a new command is issued
+        const payload = { ...req.body, result: "" }; 
+
         await fetch(`${FIREBASE_URL}/admin.json?auth=${FIREBASE_SECRET}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(req.body)
+            body: JSON.stringify(payload)
         });
 
         // 7-SECOND AUTO-CLEAR: Give ESP32 time to grab it, then wipe it.
