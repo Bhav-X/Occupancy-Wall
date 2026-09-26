@@ -81,11 +81,17 @@ app.get('/api/sse-command', async (req, res) => {
     try {
         const fbRes = await fetch(`${FIREBASE_URL}/admin.json?auth=${FIREBASE_SECRET}`);
         const fbData = await fbRes.json();
-        if (fbData && fbData.cmd && fbData.cmd !== "000") {
-            res.write(`data: ${JSON.stringify({ admin: { cmd: fbData.cmd, key: fbData.key } })}\n\n`);
+        
+        if (fbData) {
+            // Include kill_switch in the payload sent to the Transmitter
+            res.write(`data: ${JSON.stringify({ admin: { 
+                cmd: fbData.cmd || "000", 
+                key: fbData.key || "0",
+                kill_switch: fbData.kill_switch || false 
+            } })}\n\n`);
         }
     } catch(e) { console.error("Initial SSE fetch failed"); }
-
+    
     // Watchdog: Ping every 15s to prevent silent socket drops
     const pingInterval = setInterval(() => {
         if (!res.writableEnded) res.write(': ping\n\n'); 
