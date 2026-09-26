@@ -92,11 +92,19 @@ app.get('/api/sse-command', async (req, res) => {
         }
     } catch(e) { console.error("Initial SSE fetch failed"); }
     
-    // Watchdog: Ping every 15s to prevent silent socket drops
-    const pingInterval = setInterval(() => {
-        if (!res.writableEnded) res.write(': ping\n\n'); 
-    }, 15000);
-
+    // Watchdog: Ping every 15s and silently sync database Kill Switch state
+const pingInterval = setInterval(async () => {
+    if (!res.writableEnded) {
+        try {
+            const fbRes = await fetch(`${FIREBASE_URL}/admin/kill_switch.json?auth=${FIREBASE_SECRET}`);
+            const killSwitch = await fbRes.json();
+            res.write(`data: ${JSON.stringify({ admin: { cmd: "000", key: "0", kill_switch: killSwitch || false } })}\n\n`);
+        } catch (e) {
+            res.write(': ping\n\n');
+        }
+    }
+}, 15000);
+    
     // Cleanup when ESP32 cycles connection
     req.on('close', () => {
         clearInterval(pingInterval);
@@ -119,13 +127,27 @@ app.post('/api/command', async (req, res) => {
     }
 
     try {
-        // ECHO-LOOP FIX: Only push active commands to SSE, ignore "000" clears from the ESP32
-        if (cmd !== "000") {
-            const ssePayload = JSON.stringify({ admin: { cmd, key } });
-            sseClients.forEach(client => {
-                if (!client.writableEnded) client.write(`data: ${ssePayload}\n\n`);
-            });
-        }
+        // ECHO-LOOP FIX: Push active commands, preserving target ID and current Kill Switch state
+if (cmd !== "000") {
+    try {
+        const fbRes = await fetch(`${FIREBASE_URL}/admin/kill_switch.json?auth=${FIREBASE_SECRET}`);
+        const currentKillSwitch = await fbRes.json();
+        
+        const ssePayload = JSON.stringify({ 
+            admin: { 
+                cmd, 
+                key, 
+                id: req.body.id || 0, 
+                kill_switch: currentKillSwitch || false 
+            } 
+        });
+        sseClients.forEach(client => {
+            if (!client.writableEnded) client.write(`data: ${ssePayload}\n\n`);
+        });
+    } catch (e) {
+        console.error("Failed to append full payload state");
+    }
+}
 
         // Persist to Firebase and instantly clear frontend result backlog
         const payload = { ...req.body, result: "" }; 
